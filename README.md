@@ -19,22 +19,22 @@ A high-performance Go tool for scanning CommonCrawl index files, extracting URLs
 
 ## Installation
 
-### Prerequisites
-
-- Go 1.21 or later
-- Internet connection for downloading CommonCrawl data
-
-### Build
-
+**Using Go:**
 ```
-go mod tidy
-go build -o commoncrawlscans commoncrawlscans
+go install github.com/rix4uni/commoncrawlscans@latest
 ```
 
-Or run directly:
-
+**Pre-built Binaries:**
 ```
-commoncrawlscans
+wget https://github.com/rix4uni/commoncrawlscans/releases/download/v0.0.1/commoncrawlscans-linux-amd64-0.0.1.tgz
+tar -xvzf commoncrawlscans-linux-amd64-0.0.1.tgz
+mv commoncrawlscans ~/go/bin/
+```
+
+**From Source:**
+```
+git clone --depth 1 https://github.com/rix4uni/commoncrawlscans.git
+cd commoncrawlscans; go install
 ```
 
 ## Usage
