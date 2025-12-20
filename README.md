@@ -1,6 +1,6 @@
 ## CommonCrawl Scanner
 
-A high-performance Go tool for scanning CommonCrawl index files, extracting URLs, and filtering them by file extensions. This tool processes CommonCrawl data concurrently and efficiently extracts URLs matching specific file types.
+A high-performance Go tool for scanning CommonCrawl index files, extracting URLs, subdomains, and IP addresses, and filtering them by file extensions. This tool processes CommonCrawl data concurrently and efficiently extracts URLs matching specific file types, with automatic deduplication and domain validation.
 
 ## Features
 
@@ -8,9 +8,14 @@ A high-performance Go tool for scanning CommonCrawl index files, extracting URLs
 - **Memory Efficient**: Streams data directly to disk, avoiding memory accumulation
 - **Resume Support**: Can resume interrupted scans using resume files
 - **File Extension Filtering**: Automatically filters and saves URLs by 37+ file extensions
+- **Auto-Fetch Latest Crawl**: Automatically fetches the latest crawl version when no input is provided
+- **Subdomain & IP Extraction**: Extracts unique subdomains and IP addresses from URLs
+- **Domain Validation**: Filters out invalid subdomains using strict validation rules
+- **Deduplication**: Ensures all output files contain only unique entries (no duplicates)
 - **Graceful Shutdown**: Responds to CTRL+C quickly with proper cleanup
 - **Progress Tracking**: Logs which files are being processed in real-time
 - **Error Handling**: Retries failed requests with exponential backoff
+- **Flexible Exclusion**: Exclude specific file types or outputs using `--exclude` flag
 
 ## Installation
 
@@ -36,10 +41,14 @@ commoncrawlscans
 
 ### Basic Usage
 
-The tool reads the crawl version from stdin:
+The tool can read the crawl version from stdin, or automatically fetch the latest version if no input is provided:
 
 ```yaml
+# With explicit crawl version
 echo "CC-MAIN-2025-47" | commoncrawlscans
+
+# Auto-fetch latest crawl version (no input needed)
+commoncrawlscans
 ```
 
 ### With Options
@@ -54,6 +63,31 @@ echo "CC-MAIN-2025-47" | commoncrawlscans --files 10 --output results --retries 
 echo "CC-MAIN-2025-47" | commoncrawlscans --resume
 ```
 
+### Exclude File Types
+
+Exclude specific file types from being created and processed:
+
+```yaml
+# Exclude subdomains, PHP files, and ZIP files
+commoncrawlscans --exclude "subdomains,php,zip"
+```
+
+### Silent Mode
+
+Run without displaying the banner:
+
+```yaml
+commoncrawlscans --silent
+```
+
+### Check Version
+
+Print version information and exit:
+
+```yaml
+commoncrawlscans --version
+```
+
 ## Command-Line Flags
 
 | Flag | Type | Default | Description |
@@ -62,6 +96,9 @@ echo "CC-MAIN-2025-47" | commoncrawlscans --resume
 | `--output` | string | `commoncrawlscans` | Directory name to save output files |
 | `--retries` | int | 3 | Number of retry attempts for failed HTTP requests |
 | `--resume` | bool | false | Resume from previous run using resume file |
+| `--exclude` | string | `` | Comma-separated list of file types to exclude (e.g., "subdomains,php,zip") |
+| `--silent` | bool | false | Silent mode - suppress banner display |
+| `--version` | bool | false | Print version information and exit |
 
 ## Output Files
 
@@ -111,11 +148,24 @@ The tool automatically creates separate files for each matched file extension:
 - `db.txt` - Database files
 - `zip.txt` - ZIP archives
 
-Each extension file contains only the **filename** (not the full URL) of matching files.
+Each extension file contains only the **filename** (not the full URL) of matching files. All files are deduplicated, ensuring only unique entries are saved.
 
 **Example:**
 - URL: `http://example.com/path/to/file.zip`
 - Saved to `zip.txt` as: `file.zip`
+
+### Subdomain and IP Files
+
+The tool also extracts and saves subdomains and IP addresses:
+
+- **`subdomains.txt`**: Contains unique subdomains extracted from URLs (e.g., `subdomain.example.com`)
+- **`ips.txt`**: Contains unique IP addresses extracted from URLs (e.g., `192.168.1.1`)
+
+**Notes:**
+- Subdomains are validated to ensure they are valid domain names (invalid entries are filtered out)
+- IP addresses are detected using IPv4 parsing
+- Both files are deduplicated (unique entries only)
+- These files can be excluded using the `--exclude` flag (e.g., `--exclude "subdomains,ips"`)
 
 ### Resume and Failed Files
 
@@ -126,12 +176,15 @@ The tool creates tracking files in `~/.config/commoncrawlscans/`:
 
 ## How It Works
 
-1. **Fetch Index Paths**: Downloads the list of index files for the specified crawl version
-2. **Filter for Resume**: If `--resume` is used, skips already processed files
-3. **Concurrent Processing**: Downloads and processes multiple files in parallel
-4. **Streaming Extraction**: Extracts URLs line-by-line and writes immediately to disk
-5. **Extension Filtering**: Checks each URL's path (ignoring query parameters) against 37+ extensions
-6. **Save Results**: Writes URLs to main file and filenames to extension-specific files
+1. **Get Crawl Version**: Reads crawl version from stdin, or automatically fetches the latest version from Common Crawl website if no input is provided
+2. **Fetch Index Paths**: Downloads the list of index files for the specified crawl version
+3. **Filter for Resume**: If `--resume` is used, skips already processed files
+4. **Concurrent Processing**: Downloads and processes multiple files in parallel
+5. **Streaming Extraction**: Extracts URLs line-by-line and writes immediately to disk
+6. **Extension Filtering**: Checks each URL's path (ignoring query parameters) against 37+ extensions
+7. **Domain & IP Extraction**: Extracts hostnames from URLs, validates domains, and separates IPs from subdomains
+8. **Deduplication**: Ensures all output files contain only unique entries using in-memory tracking
+9. **Save Results**: Writes URLs to main file, filenames to extension-specific files, and subdomains/IPs to their respective files
 
 ## File Extension Matching Rules
 
@@ -191,6 +244,37 @@ echo "CC-MAIN-2025-47" | commoncrawlscans --output myresults
 echo "CC-MAIN-2025-47" | commoncrawlscans --resume --files 20 --retries 5
 ```
 
+### Auto-fetch latest crawl version
+
+```yaml
+# Automatically fetches and uses the latest crawl version
+commoncrawlscans
+```
+
+### Exclude specific file types
+
+```yaml
+# Exclude subdomains, PHP files, and ZIP files
+commoncrawlscans --exclude "subdomains,php,zip"
+
+# Exclude only IP addresses
+commoncrawlscans --exclude "ips"
+```
+
+### Run in silent mode
+
+```yaml
+# Suppress banner display
+commoncrawlscans --silent
+```
+
+### Check version
+
+```yaml
+# Print version information and exit
+commoncrawlscans --version
+```
+
 ### Check progress
 
 The tool logs progress in real-time:
@@ -244,11 +328,13 @@ Press CTRL+C once - the tool will attempt graceful shutdown. If it doesn't respo
 
 ```yaml
 .
-├── commoncrawlscans    # Main source file
+├── commoncrawlscans.go    # Main source file
 ├── go.mod                 # Go module file
 ├── README.md             # This file
 └── commoncrawlscans/      # Output directory (default)
     ├── commoncrawlscans.txt
+    ├── subdomains.txt
+    ├── ips.txt
     ├── php.txt
     ├── zip.txt
     ├── pdf.txt

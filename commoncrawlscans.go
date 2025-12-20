@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/rix4uni/commoncrawlscans/banner"
 	"github.com/spf13/pflag"
 )
 
@@ -34,6 +36,9 @@ type config struct {
 	output  string
 	retries int
 	resume  bool
+	exclude string
+	silent  bool
+	version bool
 }
 
 type urlResult struct {
@@ -43,6 +48,18 @@ type urlResult struct {
 
 func main() {
 	cfg := parseFlags()
+
+	// Print version and exit if -version flag is provided
+	if cfg.version {
+		banner.PrintBanner()
+		banner.PrintVersion()
+		return
+	}
+
+	// Print banner if not in silent mode
+	if !cfg.silent {
+		banner.PrintBanner()
+	}
 
 	// Read crawl version from stdin
 	crawlVersion, err := readCrawlVersion()
@@ -116,6 +133,9 @@ func main() {
 	defer outputFile.Close()
 	log.Printf("Writing output to %s", outputPath)
 
+	// Parse exclude list
+	excludeSet := parseExcludeList(cfg.exclude)
+
 	// Define all file extensions to match
 	extensions := []string{
 		".php", ".aspx", ".asp", ".jsp", ".jspx", ".do", ".sql", ".log",
@@ -125,12 +145,16 @@ func main() {
 		".ppt", ".pptx", ".doc", ".docx", ".csv", ".db", ".js", ".zip",
 	}
 
-	// Create file writers for each extension
+	// Create file writers for each extension (excluding those in exclude list)
 	extensionWriters := make(map[string]io.Writer)
 	extensionFiles := make(map[string]*os.File)
 	for _, ext := range extensions {
 		// Remove leading dot for filename
 		extName := ext[1:] // Remove the dot
+		// Check if this extension is excluded
+		if excludeSet[extName] {
+			continue
+		}
 		extPath := filepath.Join(outputDir, extName+".txt")
 		extFile, err := os.Create(extPath)
 		if err != nil {
@@ -148,6 +172,32 @@ func main() {
 		}
 	}()
 
+	// Create subdomains.txt file (if not excluded)
+	var subdomainsFile *os.File
+	if !excludeSet["subdomains"] {
+		subdomainsPath := filepath.Join(outputDir, "subdomains.txt")
+		var err error
+		subdomainsFile, err = os.Create(subdomainsPath)
+		if err != nil {
+			log.Fatalf("Failed to create subdomains file: %v", err)
+		}
+		defer subdomainsFile.Close()
+		log.Printf("Writing subdomains to %s", subdomainsPath)
+	}
+
+	// Create ips.txt file (if not excluded)
+	var ipsFile *os.File
+	if !excludeSet["ips"] {
+		ipsPath := filepath.Join(outputDir, "ips.txt")
+		var err error
+		ipsFile, err = os.Create(ipsPath)
+		if err != nil {
+			log.Fatalf("Failed to create ips file: %v", err)
+		}
+		defer ipsFile.Close()
+		log.Printf("Writing IPs to %s", ipsPath)
+	}
+
 	// Create HTTP client with connection pooling
 	// Very long timeout for file downloads - files can be very large (hundreds of MBs)
 	client := &http.Client{
@@ -161,7 +211,7 @@ func main() {
 	}
 
 	// Process files concurrently
-	processFiles(client, paths, cfg.files, cfg.retries, outputFile, extensionWriters, resumeFile, failedFile)
+	processFiles(client, paths, cfg.files, cfg.retries, outputFile, extensionWriters, subdomainsFile, ipsFile, resumeFile, failedFile, excludeSet)
 
 	log.Println("Processing complete")
 }
@@ -172,20 +222,124 @@ func parseFlags() *config {
 	pflag.StringVar(&cfg.output, "output", "", "Directory name to save output file (default: commoncrawlscans)")
 	pflag.IntVar(&cfg.retries, "retries", 3, "Number of retry attempts for failed requests")
 	pflag.BoolVar(&cfg.resume, "resume", false, "Resume from previous run using resume file")
+	pflag.StringVar(&cfg.exclude, "exclude", "", "Comma-separated list of file types to exclude (e.g., \"subdomains,php,zip\")")
+	pflag.BoolVar(&cfg.silent, "silent", false, "Silent mode.")
+	pflag.BoolVar(&cfg.version, "version", false, "Print the version of the tool and exit.")
 	pflag.Parse()
 	return cfg
 }
 
+// parseExcludeList parses a comma-separated exclude string into a map for fast lookup
+// Returns a map[string]bool where keys are normalized (lowercase, trimmed)
+func parseExcludeList(excludeStr string) map[string]bool {
+	excludeSet := make(map[string]bool)
+	if excludeStr == "" {
+		return excludeSet
+	}
+
+	// Split by comma and process each item
+	items := strings.Split(excludeStr, ",")
+	for _, item := range items {
+		// Trim spaces and convert to lowercase
+		normalized := strings.ToLower(strings.TrimSpace(item))
+		if normalized != "" {
+			excludeSet[normalized] = true
+		}
+	}
+
+	return excludeSet
+}
+
 func readCrawlVersion() (string, error) {
+	// Check if stdin is a terminal (not a pipe)
+	// If it's a terminal, user didn't pipe input, so fetch from web
+	if isStdinTerminal() {
+		log.Println("No input provided, fetching latest crawl version from Common Crawl...")
+		return fetchLatestCrawlVersion()
+	}
+
+	// Stdin is a pipe, try to read from it
 	scanner := bufio.NewScanner(os.Stdin)
 	if !scanner.Scan() {
-		return "", fmt.Errorf("no input provided")
+		// No input provided in pipe, fetch latest crawl version from web
+		log.Println("No input provided, fetching latest crawl version from Common Crawl...")
+		return fetchLatestCrawlVersion()
 	}
 	version := scanner.Text()
 	if err := scanner.Err(); err != nil {
 		return "", fmt.Errorf("error reading from stdin: %w", err)
 	}
 	return version, nil
+}
+
+func isStdinTerminal() bool {
+	stat, err := os.Stdin.Stat()
+	if err != nil {
+		// If we can't stat stdin, assume it's not a terminal and try to read
+		return false
+	}
+	// Check if stdin is a character device (terminal)
+	return (stat.Mode() & os.ModeCharDevice) != 0
+}
+
+func fetchLatestCrawlVersion() (string, error) {
+	url := "https://commoncrawl.org/latest-crawl"
+
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 10 * time.Second,
+		},
+	}
+
+	// Make HTTP GET request
+	req, err := http.NewRequestWithContext(context.Background(), "GET", url, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch latest crawl version: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	// Read response body
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response body: %w", err)
+	}
+
+	// Parse HTML to extract crawl version from <p class="paragraph-30">...</p>
+	htmlContent := string(body)
+	startPattern := `<p class="paragraph-30">`
+	startIdx := strings.Index(htmlContent, startPattern)
+	if startIdx == -1 {
+		return "", fmt.Errorf("could not find crawl version in HTML response")
+	}
+
+	// Move past the opening tag
+	startIdx += len(startPattern)
+
+	// Find the closing </p> tag
+	endIdx := strings.Index(htmlContent[startIdx:], "</p>")
+	if endIdx == -1 {
+		return "", fmt.Errorf("could not find closing tag for crawl version")
+	}
+
+	// Extract the crawl version
+	crawlVersion := strings.TrimSpace(htmlContent[startIdx : startIdx+endIdx])
+	if crawlVersion == "" {
+		return "", fmt.Errorf("extracted crawl version is empty")
+	}
+
+	log.Printf("Fetched latest crawl version: %s", crawlVersion)
+	return crawlVersion, nil
 }
 
 func getConfigDir() (string, error) {
@@ -259,7 +413,7 @@ func fetchIndexPaths(crawlVersion string, retries int) ([]string, error) {
 	return paths, nil
 }
 
-func processFiles(client *http.Client, paths []string, numWorkers int, retries int, outputWriter io.Writer, extensionWriters map[string]io.Writer, resumeFile, failedFile string) {
+func processFiles(client *http.Client, paths []string, numWorkers int, retries int, outputWriter io.Writer, extensionWriters map[string]io.Writer, subdomainsWriter, ipsWriter io.Writer, resumeFile, failedFile string, excludeSet map[string]bool) {
 	// Create channels for work distribution and results
 	pathChan := make(chan string, numWorkers*2)
 	resultChan := make(chan urlResult, numWorkers*2)
@@ -295,6 +449,27 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 		extensionBuffers[ext] = bufio.NewWriterSize(writer, 64*1024) // 64KB buffer
 	}
 
+	// Deduplication maps for extension files (extension -> filename -> seen)
+	seenFilenames := make(map[string]map[string]bool)
+	for ext := range extensionWriters {
+		seenFilenames[ext] = make(map[string]bool)
+	}
+
+	// Create buffered writers for subdomains and IPs (only if not excluded)
+	var subdomainsBuffer *bufio.Writer
+	var ipsBuffer *bufio.Writer
+	if subdomainsWriter != nil {
+		subdomainsBuffer = bufio.NewWriterSize(subdomainsWriter, 64*1024)
+	}
+	if ipsWriter != nil {
+		ipsBuffer = bufio.NewWriterSize(ipsWriter, 64*1024)
+	}
+
+	// Deduplication maps for subdomains and IPs
+	seenSubdomains := make(map[string]bool)
+	seenIPs := make(map[string]bool)
+	var subdomainIPMutex sync.Mutex
+
 	// Start dedicated URL writer goroutine (reduces mutex contention)
 	var urlWriterWg sync.WaitGroup
 	urlWriterWg.Add(1)
@@ -307,6 +482,15 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 				bufWriter.Flush()
 			}
 			extensionMutex.Unlock()
+			// Flush subdomains and IPs (if not excluded)
+			subdomainIPMutex.Lock()
+			if subdomainsBuffer != nil {
+				subdomainsBuffer.Flush()
+			}
+			if ipsBuffer != nil {
+				ipsBuffer.Flush()
+			}
+			subdomainIPMutex.Unlock()
 		}()
 
 		batchCount := 0
@@ -322,12 +506,46 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 				}
 				// Check all extensions in one efficient pass
 				if matchedExt, filename := extractFilenameByExtension(line); matchedExt != "" {
+					filenameStr := string(filename)
 					extensionMutex.Lock()
 					if bufWriter, ok := extensionBuffers[matchedExt]; ok {
-						bufWriter.Write(filename)
-						bufWriter.WriteByte('\n')
+						// Check if filename has been seen before
+						if !seenFilenames[matchedExt][filenameStr] {
+							seenFilenames[matchedExt][filenameStr] = true
+							bufWriter.Write(filename)
+							bufWriter.WriteByte('\n')
+						}
 					}
 					extensionMutex.Unlock()
+				}
+
+				// Extract hostname and check if it's an IP or subdomain
+				hostname := extractHostnameFromURL(line)
+				if hostname != "" {
+					// Check if hostname is an IP address
+					if ip := net.ParseIP(hostname); ip != nil {
+						// It's an IP address (only process if not excluded)
+						if ipsBuffer != nil {
+							subdomainIPMutex.Lock()
+							if !seenIPs[hostname] {
+								seenIPs[hostname] = true
+								ipsBuffer.WriteString(hostname)
+								ipsBuffer.WriteByte('\n')
+							}
+							subdomainIPMutex.Unlock()
+						}
+					} else {
+						// It's a domain/subdomain - validate before writing (only if not excluded)
+						if subdomainsBuffer != nil && isValidDomain(hostname) {
+							subdomainIPMutex.Lock()
+							if !seenSubdomains[hostname] {
+								seenSubdomains[hostname] = true
+								subdomainsBuffer.WriteString(hostname)
+								subdomainsBuffer.WriteByte('\n')
+							}
+							subdomainIPMutex.Unlock()
+						}
+					}
 				}
 			}
 
@@ -340,6 +558,14 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 					bufWriter.Flush()
 				}
 				extensionMutex.Unlock()
+				subdomainIPMutex.Lock()
+				if subdomainsBuffer != nil {
+					subdomainsBuffer.Flush()
+				}
+				if ipsBuffer != nil {
+					ipsBuffer.Flush()
+				}
+				subdomainIPMutex.Unlock()
 			}
 		}
 		writer.Flush() // Final flush
@@ -348,6 +574,14 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 			bufWriter.Flush()
 		}
 		extensionMutex.Unlock()
+		subdomainIPMutex.Lock()
+		if subdomainsBuffer != nil {
+			subdomainsBuffer.Flush()
+		}
+		if ipsBuffer != nil {
+			ipsBuffer.Flush()
+		}
+		subdomainIPMutex.Unlock()
 	}()
 
 	// Setup signal handling for graceful shutdown
@@ -670,6 +904,101 @@ func extractFilenameByExtension(urlBytes []byte) (string, []byte) {
 	}
 
 	return "", nil
+}
+
+// extractHostnameFromURL parses a URL and extracts the hostname (domain or IP)
+// It handles port numbers by removing them, and returns the hostname string
+func extractHostnameFromURL(urlBytes []byte) string {
+	urlStr := string(urlBytes)
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return ""
+	}
+
+	host := parsedURL.Host
+	if host == "" {
+		return ""
+	}
+
+	// Remove port number if present (e.g., "example.com:8080" -> "example.com")
+	// Split by colon and take the first part
+	if idx := strings.Index(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+
+	return host
+}
+
+// isValidDomain validates if a hostname is a valid domain/subdomain
+// It checks for proper domain structure, valid characters, and filters out invalid entries
+func isValidDomain(hostname string) bool {
+	if hostname == "" {
+		return false
+	}
+
+	// Must contain at least one dot (for TLD)
+	if !strings.Contains(hostname, ".") {
+		return false
+	}
+
+	// Check total length (max 253 characters for FQDN)
+	if len(hostname) > 253 {
+		return false
+	}
+
+	// Must not start or end with dot or hyphen
+	if strings.HasPrefix(hostname, ".") || strings.HasSuffix(hostname, ".") {
+		return false
+	}
+	if strings.HasPrefix(hostname, "-") || strings.HasSuffix(hostname, "-") {
+		return false
+	}
+
+	// Split by dots to check each label
+	labels := strings.Split(hostname, ".")
+	if len(labels) < 2 {
+		return false
+	}
+
+	// TLD (last label) must be at least 2 characters
+	tld := labels[len(labels)-1]
+	if len(tld) < 2 {
+		return false
+	}
+
+	// Check each label
+	hasLetter := false
+	for _, label := range labels {
+		// Each label must be 1-63 characters
+		if len(label) == 0 || len(label) > 63 {
+			return false
+		}
+
+		// Check for valid characters in label (letters, numbers, hyphens)
+		for _, char := range label {
+			// Check if character is valid (letter, digit, or hyphen)
+			if !((char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+				(char >= '0' && char <= '9') || char == '-') {
+				return false
+			}
+			// Track if we have at least one letter
+			if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') {
+				hasLetter = true
+			}
+		}
+
+		// Label must not start or end with hyphen
+		if strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+	}
+
+	// Must contain at least one letter (not just numbers)
+	if !hasLetter {
+		return false
+	}
+
+	return true
 }
 
 func retryHTTP(url string, retries int) (*http.Response, error) {
