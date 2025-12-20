@@ -344,20 +344,3 @@ Press CTRL+C once - the tool will attempt graceful shutdown. If it doesn't respo
     ├── CC-MAIN-2025-47.resume
     └── CC-MAIN-2025-47.failed
 ```
-
-## Technical Details
-
-- **Language**: Go 1.21+
-- **Dependencies**: `github.com/spf13/pflag` for CLI flags
-- **HTTP Client**: Custom client with 2-hour timeout for large file downloads
-- **Concurrency**: Worker pool pattern with buffered channels
-- **I/O**: Buffered writers with periodic flushing
-
-## License
-
-This tool is provided as-is for educational and research purposes.
-
-## Contributing
-
-Contributions are welcome! Please ensure your code follows Go best practices and includes appropriate error handling.
-
