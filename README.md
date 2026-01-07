@@ -9,13 +9,15 @@ A high-performance Go tool for scanning CommonCrawl index files, extracting URLs
 - **Resume Support**: Can resume interrupted scans using resume files
 - **File Extension Filtering**: Automatically filters and saves URLs by 37+ file extensions
 - **Auto-Fetch Latest Crawl**: Automatically fetches the latest crawl version when no input is provided
+- **List Available Crawls**: List all available Common Crawl scan versions using `--list-crawl` flag
 - **Subdomain & IP Extraction**: Extracts unique subdomains and IP addresses from URLs
 - **Domain Validation**: Filters out invalid subdomains using strict validation rules
 - **Deduplication**: Ensures all output files contain only unique entries (no duplicates)
 - **Graceful Shutdown**: Responds to CTRL+C quickly with proper cleanup
 - **Progress Tracking**: Logs which files are being processed in real-time
 - **Error Handling**: Retries failed requests with exponential backoff
-- **Flexible Exclusion**: Exclude specific file types or outputs using `--exclude` flag
+- **Flexible Filtering**: Include specific file types with `--include` or exclude with `--exclude` flag
+- **Organized Output**: Saves each crawl to a separate directory named after the crawl version
 
 ## Installation
 
@@ -26,8 +28,9 @@ go install github.com/rix4uni/commoncrawlscans@latest
 
 **Pre-built Binaries:**
 ```
-wget https://github.com/rix4uni/commoncrawlscans/releases/download/v0.0.1/commoncrawlscans-linux-amd64-0.0.1.tgz
-tar -xvzf commoncrawlscans-linux-amd64-0.0.1.tgz
+wget https://github.com/rix4uni/commoncrawlscans/releases/download/v0.0.2/commoncrawlscans-linux-amd64-0.0.2.tgz
+tar -xvzf commoncrawlscans-linux-amd64-0.0.2.tgz
+rm -rf commoncrawlscans-linux-amd64-0.0.2.tgz
 mv commoncrawlscans ~/go/bin/
 ```
 
@@ -72,6 +75,20 @@ Exclude specific file types from being created and processed:
 commoncrawlscans --exclude "subdomains,php,zip"
 ```
 
+### Include Specific File Types
+
+Create only specific output files (useful when you only need subdomains or IPs):
+
+```yaml
+# Only create subdomains.txt and ips.txt
+commoncrawlscans --include "subdomains,ips"
+
+# Only create PHP files
+commoncrawlscans --include "php"
+```
+
+**Note:** When using `--include`, the main `commoncrawlscans.txt` file is not created. Only the specified file types are generated. Cannot use both `--include` and `--exclude` together.
+
 ### Silent Mode
 
 Run without displaying the banner:
@@ -88,23 +105,39 @@ Print version information and exit:
 commoncrawlscans --version
 ```
 
+### List Available Crawl Versions
+
+List all available Common Crawl scan versions:
+
+```yaml
+commoncrawlscans --list-crawl
+```
+
+This will output all available crawl versions, one per line (e.g., CC-MAIN-2025-51, CC-MAIN-2025-47, etc.).
+
 ## Command-Line Flags
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--files` | int | 1 | Number of files to process concurrently |
-| `--output` | string | `commoncrawlscans` | Directory name to save output files |
+| `--output` | string | `{crawl-version}` | Directory name to save output files (default: crawl version like CC-MAIN-2025-47) |
 | `--retries` | int | 3 | Number of retry attempts for failed HTTP requests |
 | `--resume` | bool | false | Resume from previous run using resume file |
 | `--exclude` | string | `` | Comma-separated list of file types to exclude (e.g., "subdomains,php,zip") |
+| `--include` | string | `` | Comma-separated list of file types to include (e.g., "subdomains,ips") |
+| `--list-crawl` | bool | false | List all available Common Crawl scans and exit |
 | `--silent` | bool | false | Silent mode - suppress banner display |
 | `--version` | bool | false | Print version information and exit |
 
+**Note:** Cannot use both `--include` and `--exclude` together.
+
 ## Output Files
+
+By default, all output files are saved in a directory named after the crawl version (e.g., `CC-MAIN-2025-47/`). You can override this with the `--output` flag.
 
 ### Main Output
 
-- **`commoncrawlscans.txt`**: Contains all extracted URLs (one per line)
+- **`commoncrawlscans.txt`**: Contains all extracted URLs (one per line). Not created when using `--include` flag.
 
 ### Extension-Specific Files
 
@@ -275,6 +308,39 @@ commoncrawlscans --silent
 commoncrawlscans --version
 ```
 
+### List all available crawls
+
+```yaml
+# See all available Common Crawl versions
+commoncrawlscans --list-crawl
+```
+
+### Include only specific file types
+
+```yaml
+# Only extract subdomains and IPs (no other files)
+commoncrawlscans --include "subdomains,ips"
+
+# Only extract PHP files
+echo "CC-MAIN-2025-47" | commoncrawlscans --include "php"
+
+# Only extract backup files and config files
+commoncrawlscans --include "bak,backup,conf,ini,env"
+```
+
+### Exclude vs Include
+
+```yaml
+# Exclude: Creates all files EXCEPT php and js
+commoncrawlscans --exclude "php,js"
+
+# Include: Creates ONLY subdomains and ips (nothing else)
+commoncrawlscans --include "subdomains,ips"
+
+# Error: Cannot use both together
+# commoncrawlscans --include "subdomains" --exclude "php"  # This will fail
+```
+
 ### Check progress
 
 The tool logs progress in real-time:
@@ -331,8 +397,8 @@ Press CTRL+C once - the tool will attempt graceful shutdown. If it doesn't respo
 ├── commoncrawlscans.go    # Main source file
 ├── go.mod                 # Go module file
 ├── README.md             # This file
-└── commoncrawlscans/      # Output directory (default)
-    ├── commoncrawlscans.txt
+└── CC-MAIN-2025-47/       # Output directory (named after crawl version)
+    ├── commoncrawlscans.txt  # (only if --include is not used)
     ├── subdomains.txt
     ├── ips.txt
     ├── php.txt

@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -32,13 +33,15 @@ const (
 )
 
 type config struct {
-	files   int
-	output  string
-	retries int
-	resume  bool
-	exclude string
-	silent  bool
-	version bool
+	files     int
+	output    string
+	retries   int
+	resume    bool
+	exclude   string
+	include   string
+	listCrawl bool
+	silent    bool
+	version   bool
 }
 
 type urlResult struct {
@@ -53,6 +56,18 @@ func main() {
 	if cfg.version {
 		banner.PrintBanner()
 		banner.PrintVersion()
+		return
+	}
+
+	// List crawl versions and exit if --list-crawl flag is provided
+	if cfg.listCrawl {
+		crawls, err := fetchCrawlList()
+		if err != nil {
+			log.Fatalf("Failed to fetch crawl list: %v", err)
+		}
+		for _, crawl := range crawls {
+			fmt.Println(crawl)
+		}
 		return
 	}
 
@@ -118,23 +133,31 @@ func main() {
 	// Setup output - always write to file, never stdout
 	outputDir := cfg.output
 	if outputDir == "" {
-		outputDir = "commoncrawlscans" // Default directory
+		outputDir = crawlVersion // Default directory is the crawl version
 	}
 
 	// Create output directory if it doesn't exist
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		log.Fatalf("Failed to create output directory: %v", err)
 	}
-	outputPath := filepath.Join(outputDir, "commoncrawlscans.txt")
-	outputFile, err := os.Create(outputPath)
-	if err != nil {
-		log.Fatalf("Failed to create output file: %v", err)
-	}
-	defer outputFile.Close()
-	log.Printf("Writing output to %s", outputPath)
 
-	// Parse exclude list
+	// Parse include/exclude lists
+	includeSet := parseIncludeList(cfg.include)
 	excludeSet := parseExcludeList(cfg.exclude)
+	usingInclude := cfg.include != ""
+
+	// Create main output file only if not using --include flag
+	var outputFile *os.File
+	if !usingInclude {
+		outputPath := filepath.Join(outputDir, "commoncrawlscans.txt")
+		var err error
+		outputFile, err = os.Create(outputPath)
+		if err != nil {
+			log.Fatalf("Failed to create output file: %v", err)
+		}
+		defer outputFile.Close()
+		log.Printf("Writing output to %s", outputPath)
+	}
 
 	// Define all file extensions to match
 	extensions := []string{
@@ -145,16 +168,26 @@ func main() {
 		".ppt", ".pptx", ".doc", ".docx", ".csv", ".db", ".js", ".zip",
 	}
 
-	// Create file writers for each extension (excluding those in exclude list)
+	// Create file writers for each extension
 	extensionWriters := make(map[string]io.Writer)
 	extensionFiles := make(map[string]*os.File)
 	for _, ext := range extensions {
 		// Remove leading dot for filename
 		extName := ext[1:] // Remove the dot
-		// Check if this extension is excluded
-		if excludeSet[extName] {
-			continue
+
+		// Check if this extension should be created based on include/exclude logic
+		if usingInclude {
+			// Include mode: only create if in include list
+			if !includeSet[extName] {
+				continue
+			}
+		} else {
+			// Exclude mode: create if not in exclude list
+			if excludeSet[extName] {
+				continue
+			}
 		}
+
 		extPath := filepath.Join(outputDir, extName+".txt")
 		extFile, err := os.Create(extPath)
 		if err != nil {
@@ -172,9 +205,16 @@ func main() {
 		}
 	}()
 
-	// Create subdomains.txt file (if not excluded)
+	// Create subdomains.txt file based on include/exclude logic
 	var subdomainsFile *os.File
-	if !excludeSet["subdomains"] {
+	shouldCreateSubdomains := false
+	if usingInclude {
+		shouldCreateSubdomains = includeSet["subdomains"]
+	} else {
+		shouldCreateSubdomains = !excludeSet["subdomains"]
+	}
+
+	if shouldCreateSubdomains {
 		subdomainsPath := filepath.Join(outputDir, "subdomains.txt")
 		var err error
 		subdomainsFile, err = os.Create(subdomainsPath)
@@ -185,9 +225,16 @@ func main() {
 		log.Printf("Writing subdomains to %s", subdomainsPath)
 	}
 
-	// Create ips.txt file (if not excluded)
+	// Create ips.txt file based on include/exclude logic
 	var ipsFile *os.File
-	if !excludeSet["ips"] {
+	shouldCreateIPs := false
+	if usingInclude {
+		shouldCreateIPs = includeSet["ips"]
+	} else {
+		shouldCreateIPs = !excludeSet["ips"]
+	}
+
+	if shouldCreateIPs {
 		ipsPath := filepath.Join(outputDir, "ips.txt")
 		var err error
 		ipsFile, err = os.Create(ipsPath)
@@ -219,13 +266,21 @@ func main() {
 func parseFlags() *config {
 	cfg := &config{}
 	pflag.IntVar(&cfg.files, "files", 1, "Number of files to process concurrently")
-	pflag.StringVar(&cfg.output, "output", "", "Directory name to save output file (default: commoncrawlscans)")
+	pflag.StringVar(&cfg.output, "output", "", "Directory name to save output file (default: crawl version)")
 	pflag.IntVar(&cfg.retries, "retries", 3, "Number of retry attempts for failed requests")
 	pflag.BoolVar(&cfg.resume, "resume", false, "Resume from previous run using resume file")
 	pflag.StringVar(&cfg.exclude, "exclude", "", "Comma-separated list of file types to exclude (e.g., \"subdomains,php,zip\")")
+	pflag.StringVar(&cfg.include, "include", "", "Comma-separated list of file types to include (e.g., \"subdomains,ips\")")
+	pflag.BoolVar(&cfg.listCrawl, "list-crawl", false, "List all available Common Crawl scans and exit.")
 	pflag.BoolVar(&cfg.silent, "silent", false, "Silent mode.")
 	pflag.BoolVar(&cfg.version, "version", false, "Print the version of the tool and exit.")
 	pflag.Parse()
+
+	// Validate that both --include and --exclude are not used together
+	if cfg.include != "" && cfg.exclude != "" {
+		log.Fatalf("Error: Cannot use both --include and --exclude flags together")
+	}
+
 	return cfg
 }
 
@@ -248,6 +303,27 @@ func parseExcludeList(excludeStr string) map[string]bool {
 	}
 
 	return excludeSet
+}
+
+// parseIncludeList parses a comma-separated include string into a map for fast lookup
+// Returns a map[string]bool where keys are normalized (lowercase, trimmed)
+func parseIncludeList(includeStr string) map[string]bool {
+	includeSet := make(map[string]bool)
+	if includeStr == "" {
+		return includeSet
+	}
+
+	// Split by comma and process each item
+	items := strings.Split(includeStr, ",")
+	for _, item := range items {
+		// Trim spaces and convert to lowercase
+		normalized := strings.ToLower(strings.TrimSpace(item))
+		if normalized != "" {
+			includeSet[normalized] = true
+		}
+	}
+
+	return includeSet
 }
 
 func readCrawlVersion() (string, error) {
@@ -340,6 +416,50 @@ func fetchLatestCrawlVersion() (string, error) {
 
 	log.Printf("Fetched latest crawl version: %s", crawlVersion)
 	return crawlVersion, nil
+}
+
+func fetchCrawlList() ([]string, error) {
+	url := "https://index.commoncrawl.org/collinfo.json"
+
+	// Create HTTP client with timeout
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 10 * time.Second,
+		},
+	}
+
+	// Make HTTP GET request
+	req, err := http.NewRequestWithContext(context.Background(), "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch crawl list: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	// Parse JSON response
+	var crawls []map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&crawls); err != nil {
+		return nil, fmt.Errorf("failed to parse JSON: %w", err)
+	}
+
+	// Extract IDs
+	var ids []string
+	for _, crawl := range crawls {
+		if id, ok := crawl["id"].(string); ok {
+			ids = append(ids, id)
+		}
+	}
+
+	return ids, nil
 }
 
 func getConfigDir() (string, error) {
@@ -437,9 +557,12 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 	defer resumeWriter.Flush()
 	defer failedWriter.Flush()
 
-	// Create shared writer for output file with large buffer
-	writer := bufio.NewWriterSize(outputWriter, 1024*1024) // 1MB buffer
-	defer writer.Flush()
+	// Create shared writer for output file with large buffer (only if outputWriter is not nil)
+	var writer *bufio.Writer
+	if outputWriter != nil {
+		writer = bufio.NewWriterSize(outputWriter, 1024*1024) // 1MB buffer
+		defer writer.Flush()
+	}
 
 	// Create buffered writers for each extension file
 	extensionBuffers := make(map[string]*bufio.Writer)
@@ -495,8 +618,10 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 
 		batchCount := 0
 		for urls := range urlChan {
-			// Write all URLs to main output
-			writer.Write(urls)
+			// Write all URLs to main output (only if writer is not nil)
+			if writer != nil {
+				writer.Write(urls)
+			}
 
 			// Filter and extract filenames for all extensions in one pass
 			lines := bytes.Split(urls, []byte{'\n'})
@@ -552,7 +677,9 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 			batchCount++
 			// Flush every 100 batches to ensure data is written
 			if batchCount%100 == 0 {
-				writer.Flush()
+				if writer != nil {
+					writer.Flush()
+				}
 				extensionMutex.Lock()
 				for _, bufWriter := range extensionBuffers {
 					bufWriter.Flush()
@@ -568,7 +695,9 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 				subdomainIPMutex.Unlock()
 			}
 		}
-		writer.Flush() // Final flush
+		if writer != nil {
+			writer.Flush() // Final flush
+		}
 		extensionMutex.Lock()
 		for _, bufWriter := range extensionBuffers {
 			bufWriter.Flush()
