@@ -12,7 +12,7 @@ A high-performance Go tool for scanning CommonCrawl index files, extracting URLs
 - **List Available Crawls**: List all available Common Crawl scan versions using `--list-crawl` flag
 - **Subdomain & IP Extraction**: Extracts unique subdomains and IP addresses from URLs
 - **Domain Validation**: Filters out invalid subdomains using strict validation rules
-- **Deduplication**: Ensures all output files contain only unique entries (no duplicates)
+- **Deduplication**: Ensures all output files contain only unique entries (no duplicates). Use `--skip-dedup` to disable and reduce RAM usage
 - **Graceful Shutdown**: Responds to CTRL+C quickly with proper cleanup
 - **Progress Tracking**: Logs which files are being processed in real-time
 - **Error Handling**: Retries failed requests with exponential backoff
@@ -28,9 +28,9 @@ go install github.com/rix4uni/commoncrawlscans@latest
 
 **Pre-built Binaries:**
 ```
-wget https://github.com/rix4uni/commoncrawlscans/releases/download/v0.0.2/commoncrawlscans-linux-amd64-0.0.2.tgz
-tar -xvzf commoncrawlscans-linux-amd64-0.0.2.tgz
-rm -rf commoncrawlscans-linux-amd64-0.0.2.tgz
+wget https://github.com/rix4uni/commoncrawlscans/releases/download/v0.0.3/commoncrawlscans-linux-amd64-0.0.3.tgz
+tar -xvzf commoncrawlscans-linux-amd64-0.0.3.tgz
+rm -rf commoncrawlscans-linux-amd64-0.0.3.tgz
 mv commoncrawlscans ~/go/bin/
 ```
 
@@ -128,6 +128,7 @@ This will output all available crawl versions, one per line (e.g., CC-MAIN-2025-
 | `--list-crawl` | bool | false | List all available Common Crawl scans and exit |
 | `--silent` | bool | false | Silent mode - suppress banner display |
 | `--version` | bool | false | Print version information and exit |
+| `--skip-dedup` | bool | false | Skip deduplication to reduce RAM usage. Output may contain duplicates. Use 'sort -u' to deduplicate later |
 
 **Note:** Cannot use both `--include` and `--exclude` together.
 
@@ -216,7 +217,7 @@ The tool creates tracking files in `~/.config/commoncrawlscans/`:
 5. **Streaming Extraction**: Extracts URLs line-by-line and writes immediately to disk
 6. **Extension Filtering**: Checks each URL's path (ignoring query parameters) against 37+ extensions
 7. **Domain & IP Extraction**: Extracts hostnames from URLs, validates domains, and separates IPs from subdomains
-8. **Deduplication**: Ensures all output files contain only unique entries using in-memory tracking
+8. **Deduplication**: Ensures all output files contain only unique entries using in-memory tracking (can be disabled with `--skip-dedup` to reduce RAM usage)
 9. **Save Results**: Writes URLs to main file, filenames to extension-specific files, and subdomains/IPs to their respective files
 
 ## File Extension Matching Rules
@@ -341,6 +342,21 @@ commoncrawlscans --include "subdomains,ips"
 # commoncrawlscans --include "subdomains" --exclude "php"  # This will fail
 ```
 
+### Skip Deduplication (Reduce RAM Usage)
+
+Use `--skip-dedup` to disable in-memory deduplication and significantly reduce RAM usage. Output files may contain duplicates, which can be removed later using `sort -u`:
+
+```yaml
+# Process with deduplication disabled (reduces RAM usage)
+echo "CC-MAIN-2025-51" | commoncrawlscans --include "subdomains" --files 20 --skip-dedup
+
+# Deduplicate output files later
+cat CC-MAIN-2025-51/subdomains.txt | sort -u >> subdomains_unique.txt
+
+```
+
+**Note:** When using `--skip-dedup`, the tool writes entries directly to files without checking for duplicates, which can save significant RAM when processing large datasets. All output types (main file, extension files, subdomains, IPs) are affected by this flag.
+
 ### Check progress
 
 The tool logs progress in real-time:
@@ -371,6 +387,7 @@ Press CTRL+C once - the tool will attempt graceful shutdown. If it doesn't respo
 
 - The tool streams data to disk, so memory usage should be low (~100MB)
 - If you see high memory usage, reduce `--files` to process fewer files concurrently
+- Use `--skip-dedup` flag to disable in-memory deduplication and significantly reduce RAM usage. Output may contain duplicates, but you can deduplicate later using `sort -u`
 
 ### Slow Processing
 

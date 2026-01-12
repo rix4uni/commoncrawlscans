@@ -42,6 +42,7 @@ type config struct {
 	listCrawl bool
 	silent    bool
 	version   bool
+	skipDedup bool
 }
 
 type urlResult struct {
@@ -258,7 +259,7 @@ func main() {
 	}
 
 	// Process files concurrently
-	processFiles(client, paths, cfg.files, cfg.retries, outputFile, extensionWriters, subdomainsFile, ipsFile, resumeFile, failedFile, excludeSet)
+	processFiles(client, paths, cfg.files, cfg.retries, outputFile, extensionWriters, subdomainsFile, ipsFile, resumeFile, failedFile, excludeSet, cfg.skipDedup)
 
 	log.Println("Processing complete")
 }
@@ -274,6 +275,7 @@ func parseFlags() *config {
 	pflag.BoolVar(&cfg.listCrawl, "list-crawl", false, "List all available Common Crawl scans and exit.")
 	pflag.BoolVar(&cfg.silent, "silent", false, "Silent mode.")
 	pflag.BoolVar(&cfg.version, "version", false, "Print the version of the tool and exit.")
+	pflag.BoolVar(&cfg.skipDedup, "skip-dedup", false, "Skip deduplication to reduce RAM usage. Output may contain duplicates. Use 'sort -u' to deduplicate later.")
 	pflag.Parse()
 
 	// Validate that both --include and --exclude are not used together
@@ -533,7 +535,7 @@ func fetchIndexPaths(crawlVersion string, retries int) ([]string, error) {
 	return paths, nil
 }
 
-func processFiles(client *http.Client, paths []string, numWorkers int, retries int, outputWriter io.Writer, extensionWriters map[string]io.Writer, subdomainsWriter, ipsWriter io.Writer, resumeFile, failedFile string, excludeSet map[string]bool) {
+func processFiles(client *http.Client, paths []string, numWorkers int, retries int, outputWriter io.Writer, extensionWriters map[string]io.Writer, subdomainsWriter, ipsWriter io.Writer, resumeFile, failedFile string, excludeSet map[string]bool, skipDedup bool) {
 	// Create channels for work distribution and results
 	pathChan := make(chan string, numWorkers*2)
 	resultChan := make(chan urlResult, numWorkers*2)
@@ -573,9 +575,13 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 	}
 
 	// Deduplication maps for extension files (extension -> filename -> seen)
-	seenFilenames := make(map[string]map[string]bool)
-	for ext := range extensionWriters {
-		seenFilenames[ext] = make(map[string]bool)
+	// Only initialize if deduplication is enabled
+	var seenFilenames map[string]map[string]bool
+	if !skipDedup {
+		seenFilenames = make(map[string]map[string]bool)
+		for ext := range extensionWriters {
+			seenFilenames[ext] = make(map[string]bool)
+		}
 	}
 
 	// Create buffered writers for subdomains and IPs (only if not excluded)
@@ -589,8 +595,13 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 	}
 
 	// Deduplication maps for subdomains and IPs
-	seenSubdomains := make(map[string]bool)
-	seenIPs := make(map[string]bool)
+	// Only initialize if deduplication is enabled
+	var seenSubdomains map[string]bool
+	var seenIPs map[string]bool
+	if !skipDedup {
+		seenSubdomains = make(map[string]bool)
+		seenIPs = make(map[string]bool)
+	}
 	var subdomainIPMutex sync.Mutex
 
 	// Start dedicated URL writer goroutine (reduces mutex contention)
@@ -634,11 +645,16 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 					filenameStr := string(filename)
 					extensionMutex.Lock()
 					if bufWriter, ok := extensionBuffers[matchedExt]; ok {
-						// Check if filename has been seen before
-						if !seenFilenames[matchedExt][filenameStr] {
-							seenFilenames[matchedExt][filenameStr] = true
+						// Check if filename has been seen before (only if deduplication is enabled)
+						if skipDedup {
 							bufWriter.Write(filename)
 							bufWriter.WriteByte('\n')
+						} else {
+							if !seenFilenames[matchedExt][filenameStr] {
+								seenFilenames[matchedExt][filenameStr] = true
+								bufWriter.Write(filename)
+								bufWriter.WriteByte('\n')
+							}
 						}
 					}
 					extensionMutex.Unlock()
@@ -652,10 +668,15 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 						// It's an IP address (only process if not excluded)
 						if ipsBuffer != nil {
 							subdomainIPMutex.Lock()
-							if !seenIPs[hostname] {
-								seenIPs[hostname] = true
+							if skipDedup {
 								ipsBuffer.WriteString(hostname)
 								ipsBuffer.WriteByte('\n')
+							} else {
+								if !seenIPs[hostname] {
+									seenIPs[hostname] = true
+									ipsBuffer.WriteString(hostname)
+									ipsBuffer.WriteByte('\n')
+								}
 							}
 							subdomainIPMutex.Unlock()
 						}
@@ -663,10 +684,15 @@ func processFiles(client *http.Client, paths []string, numWorkers int, retries i
 						// It's a domain/subdomain - validate before writing (only if not excluded)
 						if subdomainsBuffer != nil && isValidDomain(hostname) {
 							subdomainIPMutex.Lock()
-							if !seenSubdomains[hostname] {
-								seenSubdomains[hostname] = true
+							if skipDedup {
 								subdomainsBuffer.WriteString(hostname)
 								subdomainsBuffer.WriteByte('\n')
+							} else {
+								if !seenSubdomains[hostname] {
+									seenSubdomains[hostname] = true
+									subdomainsBuffer.WriteString(hostname)
+									subdomainsBuffer.WriteByte('\n')
+								}
 							}
 							subdomainIPMutex.Unlock()
 						}
